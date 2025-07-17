@@ -2,3 +2,5 @@
 .idea
 load_chronos/data.csv
 modified_chronos_experiments/data
+src/data
+src/__pycache__
