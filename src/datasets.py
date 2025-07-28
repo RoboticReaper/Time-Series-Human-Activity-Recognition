@@ -73,6 +73,7 @@ class ActivityLabel(Enum):
     WAIST_BEND_FORWARD = auto()
     ARM_RAISE_FORWARD = auto()
     CROUCHING = auto()
+    COGNITIVE_TASK = auto()
 
 
 # Specifies how many axes each sensor type have
@@ -551,8 +552,6 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
         return int(total_seconds)
 
     def _get_rows_between_tags(self, data_df, frequency, data_measurement_start_date_str, start_tag=None, end_tag=None):
-        if start_tag is None and end_tag is None:
-            raise ValueError("Either start_tag or end_tag must be provided.")
 
         start_index = 1  # Default start index, skips potential initialization values
         end_index = len(data_df)
@@ -619,6 +618,7 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
             if subject_exercise_type == "AEROBIC":
                 if subject_protocol_version == "S":
                     if subject_dir_name in ["S03", "S07"]:
+                        # handle special cases for these subjects
                         tag_end = tags['tag'].iloc[-1] if subject_dir_name == "S03" else tags['tag'].iloc[7]
                         sessions.append(self._create_data_point_from_segment(
                             data_frames, sampling_rates, measurement_start_time,
@@ -652,16 +652,142 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
                     ))
 
             elif subject_exercise_type == "ANAEROBIC":
-                pass
+                if subject_protocol_version == "S":
+                    if subject_dir_name == "S06":
+                        # special subjects
+                        tag_end = tags['tag'].iloc[-1]
+                        sessions.append(self._create_data_point_from_segment(
+                            data_frames, sampling_rates, measurement_start_time,
+                            label=ActivityLabel.CYCLING, end_tag=tag_end
+                        ))
+                    else:
+                        cycle_tag_end = tags['tag'].iloc[-1]
+                        # Cycling session
+                        sessions.append(self._create_data_point_from_segment(
+                            data_frames, sampling_rates, measurement_start_time,
+                            label=ActivityLabel.CYCLING, end_tag=cycle_tag_end
+                        ))
+                        # Resting session
+                        sessions.append(self._create_data_point_from_segment(
+                            data_frames, sampling_rates, measurement_start_time,
+                            label=ActivityLabel.RESTING, start_tag=cycle_tag_end
+                        ))
+                elif subject_protocol_version == "f":
+                    cycle_tag_end = tags['tag'].iloc[-2]
+                    rest_tag_end = tags['tag'].iloc[-1]
+                    # Cycling session
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.CYCLING, end_tag=cycle_tag_end
+                    ))
+                    # Resting session
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.RESTING, start_tag=cycle_tag_end, end_tag=rest_tag_end
+                    ))
+            elif subject_exercise_type == "STRESS":
+                if subject_protocol_version == "S":
+                    baseline_tag_start = tags['tag'].iloc[0]
+                    baseline_tag_end = tags['tag'].iloc[1]
+                    stress1_tag_start = tags['tag'].iloc[2]
+                    stress1_tag_end = tags['tag'].iloc[3]
+                    rest1_tag_end = tags['tag'].iloc[4]
+                    stress2_tag_end = tags['tag'].iloc[5]
+                    rest2_tag_end = tags['tag'].iloc[6]
+                    stress3_tag_end = tags['tag'].iloc[7]
+                    stress4_tag_start = tags['tag'].iloc[8]
+                    stress4_tag_end = tags['tag'].iloc[9]
+                    stress5_tag_start = tags['tag'].iloc[10]
+                    stress5_tag_end = tags['tag'].iloc[11]
+
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.RESTING, start_tag=baseline_tag_start, end_tag=baseline_tag_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress1_tag_start, end_tag=stress1_tag_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.RESTING, start_tag=stress1_tag_end, end_tag=rest1_tag_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.COGNITIVE_TASK, start_tag=rest1_tag_end, end_tag=stress2_tag_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.RESTING, start_tag=stress2_tag_end, end_tag=rest2_tag_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.COGNITIVE_TASK, start_tag=rest2_tag_end, end_tag=stress3_tag_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress4_tag_start, end_tag=stress4_tag_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress5_tag_start, end_tag=stress5_tag_end
+                    ))
+                elif subject_protocol_version == "f":
+                    if subject_dir_name == "f07":
+                        # special subject
+                        valid_df = {
+                            SensorType.EDA: data_frames[SensorType.EDA],
+                            SensorType.ACC_WRIST_LEFT: data_frames[SensorType.ACC_WRIST_LEFT]
+                        }
+                        data_frames = valid_df
+
+                    baseline_end = tags['tag'].iloc[0]
+                    stress1_start = tags['tag'].iloc[1]
+                    stress1_end = tags['tag'].iloc[2]
+                    rest1_end = tags['tag'].iloc[3]
+                    stress2_end = tags['tag'].iloc[4]
+                    stress3_start = tags['tag'].iloc[5]
+                    stress3_end = tags['tag'].iloc[6]
+                    rest2_end = tags['tag'].iloc[7]
+                    stress4_end = tags['tag'].iloc[8]
+
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.RESTING, end_tag=baseline_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress1_start, end_tag=stress1_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.RESTING, start_tag=stress1_end, end_tag=rest1_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.COGNITIVE_TASK, start_tag=rest1_end, end_tag=stress2_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress3_start, end_tag=stress3_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.RESTING, start_tag=stress3_end, end_tag=rest2_end
+                    ))
+                    sessions.append(self._create_data_point_from_segment(
+                        data_frames, sampling_rates, measurement_start_time,
+                        label=ActivityLabel.COGNITIVE_TASK, start_tag=rest2_end, end_tag=stress4_end
+                    ))
 
         return sessions
 
 
 if __name__ == "__main__":
-    # dataset1 = HARTHDataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
-    #                        validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
-    # dataset2 = MHEALTHDataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
-    #                        validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
+    dataset1 = HARTHDataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
+                           validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
+    dataset2 = MHEALTHDataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
+                           validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
     dataset3 = InducedStressStructuredExerciseWearableDeviceDataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
                               validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
 
