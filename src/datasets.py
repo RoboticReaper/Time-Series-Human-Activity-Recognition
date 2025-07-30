@@ -2,7 +2,7 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from scipy import signal
 from datetime import datetime
 
@@ -150,9 +150,16 @@ class DataPoint:
 
 
 class HARBaseDataset(torch.utils.data.Dataset, ABC):
+    """
+        Super class for all HAR datasets. Handles downloading, reading, resampling, and windowing.
+        Subclasses must implement ``download_data`` and ``read``, and define class attributes
+        for ``_DIR_NAME`` and ``_DOWNLOAD_URL`` and ``_INTERNAL_FOLDER``.
+    """
+    _DIR_NAME: str # The folder to store the entire dataset
+    _DOWNLOAD_URL: str
+    _INTERNAL_FOLDER: str # The folder inside the zip after being extracted
     def __init__(
             self,
-            dir_name: str,
             train_split_ratio: float,
             validation_split_ratio: float,
             train_mode: bool,
@@ -170,7 +177,6 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
         Uses a sliding window technique to ensure all ``DataPoint`` samples span the same length of time.
         E.g. All sensors measure for 3 seconds.
 
-        :param dir_name: Directory where the dataset should be downloaded.
         :param train_split_ratio: Ratio of training dataset.
         :param validation_split_ratio: Ratio of validation dataset.
         :param train_mode: Dataset's ``__getitem__`` will return training split.
@@ -183,7 +189,6 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
         :param root_dir: Root directory where the dataset should be downloaded.
         """
         self.root_dir = root_dir
-        self.dir_name = dir_name
         self.train_mode = train_mode
         self.validation_mode = validation_mode
         self.test_mode = test_mode
@@ -206,19 +211,14 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
             except Exception as e:
                 print(f"Failed to create root directory {root_dir}: {e}")
 
-        full_path = os.path.join(root_dir, dir_name)
-        is_downloaded = os.path.isdir(full_path)
-        if not is_downloaded:
-            try:
-                os.mkdir(full_path)
-                print(f"Directory {full_path} created.")
-            except Exception as e:
-                print(f"Failed to create {full_path}: {e}")
+        full_path = os.path.join(root_dir, self._DIR_NAME)
 
-            self.download_data(root_dir, dir_name, full_path)
+        if not os.path.isdir(full_path):
+            os.makedirs(full_path, exist_ok=True)
+            self.download_data(full_path)
 
-        print(f"Loading {full_path} into memory.")
-        long_data_sessions = self.read(root_dir, dir_name, full_path)
+        print(f"Loading {self._DIR_NAME} from {full_path} into memory.")
+        long_data_sessions = self.read(full_path)
 
         print(f"Resampling to {TARGET_SAMPLING_RATE} hertz.")
         self._resample(long_data_sessions)
@@ -227,6 +227,35 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
         self.data = self._create_windows(long_data_sessions, window_size, stride)
 
         self.size = len(self.data)
+
+    def _group_by_activity(self, df: pd.DataFrame):
+        """Splits a DataFrame into groups of consecutive identical activities."""
+        df['session_id'] = (df['label'] != df['label'].shift()).cumsum()
+        return df.groupby('session_id')
+
+    def _get_target_subjects(self, subjects_path: str, ignored_files: List[str] = None) -> List[str]:
+        """
+        Gets a shuffled list of subject file paths for the current split (train/val/test).
+        """
+        if ignored_files is None:
+            ignored_files = []
+
+        subjects = [f for f in os.listdir(subjects_path) if f not in ignored_files]
+        rng = np.random.default_rng(self.seed)
+        rng.shuffle(subjects)
+
+        num_subjects = len(subjects)
+        train_end = int(num_subjects * self.train_split_ratio)
+        val_end = int(num_subjects * (self.train_split_ratio + self.validation_split_ratio))
+
+        if self.train_mode:
+            selected_subjects = subjects[:train_end]
+        elif self.validation_mode:
+            selected_subjects = subjects[train_end:val_end]
+        else:  # test_mode
+            selected_subjects = subjects[val_end:]
+
+        return selected_subjects
 
     def _resample(self, long_data_sessions: List[DataPoint]):
         """
@@ -256,6 +285,8 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
 
             for i in range(0, session_length - window_size + 1, stride):
                 windowed_sensors = {st: data[:, i: i + window_size] for st, data in session.sensors.items()}
+                if not all(d.shape[1] == window_size for d in windowed_sensors.values()):
+                    continue  # Skip windows that aren't full size
                 windowed_data.append(DataPoint(
                     sensors=windowed_sensors,
                     sampling_rate=session.sampling_rate,
@@ -264,12 +295,18 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
         print(f"Created {len(windowed_data)} windowed sessions from {len(long_data_sessions)} sessions.")
         return windowed_data
 
-    @abstractmethod
-    def download_data(self, root_dir, dir_name, full_path):
-        pass
+    def download_data(self, full_path:str):
+        """Downloads and extracts the dataset from the `_DOWNLOAD_URL`."""
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            print(f"Downloading {self._DIR_NAME} dataset from {self._DOWNLOAD_URL}...")
+            archive_path = os.path.join(tmpdirname, "dataset.zip")
+            wget.download(self._DOWNLOAD_URL, archive_path)
+            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                zip_ref.extractall(full_path)
+        print(f"Download complete. Dataset is in {full_path}")
 
     @abstractmethod
-    def read(self, root_dir, dir_name, full_path) -> List[DataPoint]:
+    def read(self, full_path) -> List[DataPoint]:
         """
         Handles loading the files into long, continuous sessions.
 
@@ -291,6 +328,10 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
 
 class HARTHDataset(HARBaseDataset):
     # https://archive.ics.uci.edu/dataset/779/harth
+    _DIR_NAME = 'HARTH'
+    _DOWNLOAD_URL = 'https://archive.ics.uci.edu/static/public/779/harth.zip'
+    _INTERNAL_FOLDER = 'harth'
+
     LABEL_MAPPING = {
         1: ActivityLabel.WALKING,
         2: ActivityLabel.RUNNING,
@@ -311,53 +352,20 @@ class HARTHDataset(HARBaseDataset):
         SensorType.ACC_THIGH_RIGHT: 50,
     }
 
-    def __init__(self, **kwargs):
-        kwargs.setdefault("dir_name", 'harth')
-        super().__init__(**kwargs)
-
-    def download_data(self, root_dir, dir_name, full_path):
-        link = 'https://archive.ics.uci.edu/static/public/779/harth.zip'
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            print("Downloading HARTH dataset...")
-            wget.download(link, tmpdirname)
-            zip_file = os.listdir(tmpdirname)[0]
-            with zipfile.ZipFile(os.path.join(tmpdirname, zip_file), 'r') as zip_ref:
-                zip_ref.extractall(root_dir)
-        print(f"Done. Dataset in {full_path}")
-
-    def _get_target_subjects(self, full_path):
-        # Each file is a subject. Perform split on subject level
-        files = os.listdir(full_path)
-        num_subjects = len(files)
-        rng = np.random.default_rng(self.seed)
-        rng.shuffle(files)
-
-        train_split_index = int(num_subjects * self.train_split_ratio)
-        validation_split_index = int(num_subjects * (self.train_split_ratio + self.validation_split_ratio))
-
-        if self.train_mode:
-            return files[:train_split_index]
-        elif self.validation_mode:
-            return files[train_split_index:validation_split_index]
-        else:
-            return files[validation_split_index:]
-
-    def read(self, root_dir, dir_name, full_path):
-        target_subjects = self._get_target_subjects(full_path)
+    def read(self, full_path):
+        subject_folder = os.path.join(full_path, self._INTERNAL_FOLDER)
+        target_subjects = self._get_target_subjects(subject_folder)
 
         sessions = []
 
         for subject in target_subjects:
-            file_path = os.path.join(full_path, subject)
+            file_path = os.path.join(subject_folder, subject)
+            print(file_path)
 
             df = pd.read_csv(file_path)
             df['label'] = df['label'].map(self.LABEL_MAPPING)
 
-            # Create a session ID for consecutive blocks of the same label
-            # Prioritizes performance
-            df['session_id'] = (df['label'] != df['label'].shift()).cumsum()
-
-            for session_id, session_df in df.groupby('session_id'):
+            for _, session_df in self._group_by_activity(df):
                 label = session_df['label'].iloc[0]
                 if isinstance(label, ActivityLabel):
                     sensors = {
@@ -371,6 +379,10 @@ class HARTHDataset(HARBaseDataset):
 
 class MHEALTHDataset(HARBaseDataset):
     # https://archive.ics.uci.edu/dataset/319/mhealth+dataset
+    _DIR_NAME = 'MHEALTH'
+    _DOWNLOAD_URL = 'https://archive.ics.uci.edu/static/public/319/mhealth+dataset.zip'
+    _INTERNAL_FOLDER = 'MHEALTHDATASET'
+
     LABEL_MAPPING = {
         1: ActivityLabel.STANDING,
         2: ActivityLabel.SITTING,
@@ -406,52 +418,20 @@ class MHEALTHDataset(HARBaseDataset):
                     'mag_right_lower_arm_x', 'mag_right_lower_arm_y', 'mag_right_lower_arm_z', 'label'
                     ]
 
-    def __init__(self, **kwargs):
-        kwargs.setdefault("dir_name", 'MHEALTHDATASET')
-        super().__init__(**kwargs)
-
-    def download_data(self, root_dir, dir_name, full_path):
-        link = 'https://archive.ics.uci.edu/static/public/319/mhealth+dataset.zip'
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            print("Downloading MHEALTH dataset...")
-            wget.download(link, tmpdirname)
-            zip_file = os.listdir(tmpdirname)[0]
-            with zipfile.ZipFile(os.path.join(tmpdirname, zip_file), 'r') as zip_ref:
-                zip_ref.extractall(root_dir)
-        print(f"Done. Dataset in {full_path}")
-
-    def _get_target_subjects(self, full_path):
-        # Each file is a subject, except README.txt. Perform subject-level splitting
-        files = os.listdir(full_path)
-        files.remove("README.txt")
-        num_subjects = len(files)
-        rng = np.random.default_rng(self.seed)
-        rng.shuffle(files)
-
-        train_split_index = int(num_subjects * self.train_split_ratio)
-        validation_split_index = int(num_subjects * (self.train_split_ratio + self.validation_split_ratio))
-
-        if self.train_mode:
-            return files[:train_split_index]
-        elif self.validation_mode:
-            return files[train_split_index:validation_split_index]
-        else:
-            return files[validation_split_index:]
-
-    def read(self, root_dir, dir_name, full_path) -> List[DataPoint]:
-        target_subjects = self._get_target_subjects(full_path)
+    def read(self, full_path) -> List[DataPoint]:
+        subject_folder = os.path.join(full_path, self._INTERNAL_FOLDER)
+        target_subjects = self._get_target_subjects(subject_folder, ignored_files=["README.txt"])
 
         sessions = []
 
         for subject in target_subjects:
-            file_path = os.path.join(full_path, subject)
+            file_path = os.path.join(subject_folder, subject)
+            print(file_path)
 
             df = pd.read_csv(file_path, sep='\t', header=None, names=self.COLUMN_NAMES)
             df['label'] = df['label'].map(self.LABEL_MAPPING)
 
-            df['session_id'] = (df['label'] != df['label'].shift()).cumsum()
-
-            for session_id, session_df in df.groupby('session_id'):
+            for _, session_df in self._group_by_activity(df):
                 label = session_df['label'].iloc[0]
                 if isinstance(label, ActivityLabel):
                     sensors = {
@@ -472,62 +452,52 @@ class MHEALTHDataset(HARBaseDataset):
 
 class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
     # https://physionet.org/content/wearable-device-dataset/1.0.1/
-    inside_folder_name = "wearable-device-dataset-from-induced-stress-and-structured-exercise-sessions-1.0.1"
+    _DIR_NAME = 'InducedStressStructuredExerciseWearableDevice'
+    _DOWNLOAD_URL = 'https://physionet.org/content/wearable-device-dataset/get-zip/1.0.1/'
+    _INTERNAL_FOLDER = "wearable-device-dataset-from-induced-stress-and-structured-exercise-sessions-1.0.1"
 
-    def __init__(self, **kwargs):
-        kwargs.setdefault("dir_name", 'InducedStressStructuredExerciseWearableDevice')
-        super().__init__(**kwargs)
+    SAMPLING_RATES = {
+        SensorType.ACC_WRIST_LEFT: 32,
+        SensorType.BVP: 64,
+        SensorType.EDA: 4,
+        SensorType.HR: 1,
+        SensorType.TEMP_SKIN: 4
+    }
 
-    def download_data(self, root_dir, dir_name, full_path):
-        link = 'https://physionet.org/content/wearable-device-dataset/get-zip/1.0.1/'
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            print("Downloading MHEALTH dataset...")
-            wget.download(link, tmpdirname)
-            zip_file = os.listdir(tmpdirname)[0]
-            with zipfile.ZipFile(os.path.join(tmpdirname, zip_file), 'r') as zip_ref:
-                zip_ref.extractall(full_path)
-        print(f"Done. Dataset in {full_path}")
+    def _get_all_subjects_paths(self, full_path) -> List[Tuple[str, str]]:
+        """Gets paths for all valid subjects, returning (path, type) tuples."""
+        dataset_folder = os.path.join(full_path, self._INTERNAL_FOLDER, "Wearable_Dataset")
+        all_subjects = []
 
-    def _get_target_subjects(self, full_path):
-        subjects = []
-        dataset_folder = os.path.join(full_path, self.inside_folder_name, "Wearable_Dataset")
-        aerobic_folder = os.path.join(dataset_folder, "AEROBIC")
-        aerobic_subjects = os.listdir(aerobic_folder)
+        # Define exercise types and subjects to exclude
+        exercise_folders = {
+            "AEROBIC": ["S11_a", "S11_b"],
+            "ANAEROBIC": ["S16_a", "S16_b"],
+            "STRESS": ["f14_a", "f14_b", "S02"]
+        }
 
-        # prevent leaking subject patterns between train/valid/test
-        aerobic_subjects.remove("S11_a")
-        aerobic_subjects.remove("S11_b")
+        for exercise_type, exclusions in exercise_folders.items():
+            folder_path = os.path.join(dataset_folder, exercise_type)
+            subjects = [s for s in os.listdir(folder_path) if s not in exclusions]
+            all_subjects.extend([(os.path.join(folder_path, s), exercise_type) for s in subjects])
+        return all_subjects
 
-        subjects.extend([os.path.join(aerobic_folder, subject) for subject in aerobic_subjects])
-
-        anaerobic_folder = os.path.join(dataset_folder, "ANAEROBIC")
-        anaerobic_subjects = os.listdir(anaerobic_folder)
-        anaerobic_subjects.remove("S16_a")
-        anaerobic_subjects.remove("S16_b")
-
-        subjects.extend([os.path.join(anaerobic_folder, subject) for subject in anaerobic_subjects])
-
-        stress_folder = os.path.join(dataset_folder, "STRESS")
-        stress_subjects = os.listdir(stress_folder)
-        stress_subjects.remove("f14_a")
-        stress_subjects.remove("f14_b")
-        stress_subjects.remove("S02")
-
-        subjects.extend([os.path.join(stress_folder, subject) for subject in stress_subjects])
-
-        num_subjects = len(subjects)
+    def _get_target_subjects(self, full_path, ignored_files = None):
+        """Overrides base method to handle complex subject structure."""
+        all_subjects = self._get_all_subjects_paths(full_path)
         rng = np.random.default_rng(self.seed)
-        rng.shuffle(subjects)
+        rng.shuffle(all_subjects)
 
-        train_split_index = int(num_subjects * self.train_split_ratio)
-        validation_split_index = int(num_subjects * (self.train_split_ratio + self.validation_split_ratio))
+        num_subjects = len(all_subjects)
+        train_end = int(num_subjects * self.train_split_ratio)
+        val_end = int(num_subjects * (self.train_split_ratio + self.validation_split_ratio))
 
         if self.train_mode:
-            return subjects[:train_split_index]
+            return all_subjects[:train_end]
         elif self.validation_mode:
-            return subjects[train_split_index:validation_split_index]
-        else:
-            return subjects[validation_split_index:]
+            return all_subjects[train_end:val_end]
+        else:  # test_mode
+            return all_subjects[val_end:]
 
     def _get_seconds_between_dates(self, start_date_str, end_date_str):
         """
@@ -552,8 +522,7 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
         return int(total_seconds)
 
     def _get_rows_between_tags(self, data_df, frequency, data_measurement_start_date_str, start_tag=None, end_tag=None):
-
-        start_index = 1  # Default start index, skips potential initialization values
+        start_index = 1  # Skip first row as it tends to be initialization values
         end_index = len(data_df)
 
         if start_tag is not None:
@@ -564,8 +533,7 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
 
         return data_df.iloc[start_index:end_index]
 
-    def _create_data_point_from_segment(self, data_frames: Dict[SensorType, pd.DataFrame],
-                                        sampling_rates: Dict[SensorType, int],
+    def _create_data_point(self, data_frames: Dict[SensorType, pd.DataFrame],
                                         measurement_start_time: str, label: ActivityLabel,
                                         start_tag: str = None, end_tag: str = None) -> DataPoint:
         """
@@ -573,37 +541,120 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
         """
         segmented_sensors = {}
         for sensor_type, df in data_frames.items():
-            freq = sampling_rates[sensor_type]
+            freq = self.SAMPLING_RATES[sensor_type]
             segmented_df = self._get_rows_between_tags(df, freq, measurement_start_time, start_tag, end_tag)
             segmented_sensors[sensor_type] = segmented_df.to_numpy().T
 
         return DataPoint(
             sensors=segmented_sensors,
-            sampling_rate=sampling_rates,
+            sampling_rate=self.SAMPLING_RATES.copy(),
             label=label
         )
 
-    def read(self, root_dir, dir_name, full_path) -> List[DataPoint]:
-        target_subjects_dir = self._get_target_subjects(full_path)
+    def _process_stress(self, data_frames, start_time, tags, subject_dir_name):
+        sessions = []
+        protocol_version = subject_dir_name[0]
+
+        if protocol_version == "S":
+            tag_times = tags['tag'].tolist()
+
+            # Tuples of (label, start_tag, end_tag)
+            segments = [
+                (ActivityLabel.RESTING, tag_times[0], tag_times[1]),
+                (ActivityLabel.COGNITIVE_TASK, tag_times[2], tag_times[3]),
+                (ActivityLabel.RESTING, tag_times[3], tag_times[4]),
+                (ActivityLabel.COGNITIVE_TASK, tag_times[4], tag_times[5]),
+                (ActivityLabel.RESTING, tag_times[5], tag_times[6]),
+                (ActivityLabel.COGNITIVE_TASK, tag_times[6], tag_times[7]),
+                (ActivityLabel.COGNITIVE_TASK, tag_times[8], tag_times[9]),
+                (ActivityLabel.COGNITIVE_TASK, tag_times[10], tag_times[11]),
+            ]
+        else:
+            # protocol_version is "f"
+            # Handle special subject with only 2 sensors
+            if subject_dir_name == "f07":
+                valid_dataframes = {
+                    SensorType.EDA: data_frames[SensorType.EDA],
+                    SensorType.ACC_WRIST_LEFT: data_frames[SensorType.ACC_WRIST_LEFT]
+                }
+                data_frames = valid_dataframes
+
+            tag_times = tags['tag'].tolist()
+            segments = [
+                (ActivityLabel.RESTING, None, tag_times[0]),
+                (ActivityLabel.COGNITIVE_TASK, tag_times[1], tag_times[2]),
+                (ActivityLabel.RESTING, tag_times[2], tag_times[3]),
+                (ActivityLabel.COGNITIVE_TASK, tag_times[3], tag_times[4]),
+                (ActivityLabel.COGNITIVE_TASK, tag_times[5], tag_times[6]),
+                (ActivityLabel.RESTING, tag_times[6], tag_times[7]),
+                (ActivityLabel.COGNITIVE_TASK, tag_times[7], tag_times[8]),
+            ]
+
+        for label, start_tag, end_tag in segments:
+            sessions.append(self._create_data_point(data_frames, start_time, label, start_tag, end_tag))
+
+        return sessions
+
+    def _process_aerobic_and_anaerobic(self, data_frames, start_time, tags, subject_dir_name, exercise_type):
+        sessions = []
+        protocol_version = subject_dir_name[0]
+
+        # Handle special cases with unusual tag structures
+        if exercise_type == 'AEROBIC' and subject_dir_name in ['S03', 'S07']:
+            tag_end = tags['tag'].iloc[-1] if subject_dir_name == "S03" else tags['tag'].iloc[7]
+            sessions.append(self._create_data_point(
+                data_frames, start_time,
+                label=ActivityLabel.CYCLING, end_tag=tag_end
+            ))
+            return sessions
+
+        if exercise_type == 'ANAEROBIC' and subject_dir_name == "S06":
+            tag_end = tags['tag'].iloc[-1]
+            sessions.append(self._create_data_point(
+                data_frames, start_time,
+                label=ActivityLabel.CYCLING, end_tag=tag_end
+            ))
+            return sessions
+
+        # Handle normal protocols
+        if protocol_version == "S":
+            cycle_tag_end = tags['tag'].iloc[-1]
+            # Cycling session
+            sessions.append(self._create_data_point(
+                data_frames, start_time,
+                label=ActivityLabel.CYCLING, end_tag=cycle_tag_end
+            ))
+            # Resting session
+            sessions.append(self._create_data_point(
+                data_frames, start_time,
+                label=ActivityLabel.RESTING, start_tag=cycle_tag_end
+            ))
+        elif protocol_version == 'f':
+            cycle_tag_end_idx = 6 if exercise_type == 'AEROBIC' else -2
+            cycle_tag_end = tags['tag'].iloc[cycle_tag_end_idx]
+            rest_tag_end = tags['tag'].iloc[-1]
+
+            # Cycling session
+            sessions.append(self._create_data_point(
+                data_frames, start_time,
+                label=ActivityLabel.CYCLING, end_tag=cycle_tag_end
+            ))
+            # Resting session
+            sessions.append(self._create_data_point(
+                data_frames, start_time,
+                label=ActivityLabel.RESTING, start_tag=cycle_tag_end, end_tag=rest_tag_end
+            ))
+
+        return sessions
+
+    def read(self, full_path: str) -> List[DataPoint]:
+        target_subjects = self._get_target_subjects(full_path)
         sessions = []
 
-        sampling_rates = {
-            SensorType.ACC_WRIST_LEFT: 32,
-            SensorType.BVP: 64,
-            SensorType.EDA: 4,
-            SensorType.HR: 1,
-            SensorType.TEMP_SKIN: 4
-        }
-
-        for subject_dir in target_subjects_dir:
-            parent_dir_path = os.path.dirname(subject_dir)
-            subject_exercise_type = os.path.basename(parent_dir_path)
-            subject_dir_name = os.path.basename(subject_dir)
-            subject_protocol_version = subject_dir_name[0]
-
-            # Load data into a dictionary of dataframes
+        for subject_dir, exercise_type in target_subjects:
+            # Load all data files for the subject
             acc_df = pd.read_csv(os.path.join(subject_dir, "ACC.csv"))
-            measurement_start_time = str(acc_df.columns[0])
+            start_time = str(acc_df.columns[0])
             acc_df.columns = ['x', 'y', 'z']
 
             data_frames = {
@@ -614,173 +665,16 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
                 SensorType.TEMP_SKIN: pd.read_csv(os.path.join(subject_dir, "TEMP.csv"), names=['temp'])
             }
             tags = pd.read_csv(os.path.join(subject_dir, "tags.csv"), header=None, names=['tag'])
+            subject_dir_name = os.path.basename(subject_dir)
 
-            if subject_exercise_type == "AEROBIC":
-                if subject_protocol_version == "S":
-                    if subject_dir_name in ["S03", "S07"]:
-                        # handle special cases for these subjects
-                        tag_end = tags['tag'].iloc[-1] if subject_dir_name == "S03" else tags['tag'].iloc[7]
-                        sessions.append(self._create_data_point_from_segment(
-                            data_frames, sampling_rates, measurement_start_time,
-                            label=ActivityLabel.CYCLING, end_tag=tag_end
-                        ))
-                    else:
-                        cycle_tag_end = tags['tag'].iloc[-1]
-                        # Cycling session
-                        sessions.append(self._create_data_point_from_segment(
-                            data_frames, sampling_rates, measurement_start_time,
-                            label=ActivityLabel.CYCLING, end_tag=cycle_tag_end
-                        ))
-                        # Resting session
-                        sessions.append(self._create_data_point_from_segment(
-                            data_frames, sampling_rates, measurement_start_time,
-                            label=ActivityLabel.RESTING, start_tag=cycle_tag_end
-                        ))
-
-                elif subject_protocol_version == "f":
-                    cycle_tag_end = tags['tag'].iloc[6]
-                    rest_tag_end = tags['tag'].iloc[-1]
-                    # Cycling session
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.CYCLING, end_tag=cycle_tag_end
-                    ))
-                    # Resting session
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.RESTING, start_tag=cycle_tag_end, end_tag=rest_tag_end
-                    ))
-
-            elif subject_exercise_type == "ANAEROBIC":
-                if subject_protocol_version == "S":
-                    if subject_dir_name == "S06":
-                        # special subjects
-                        tag_end = tags['tag'].iloc[-1]
-                        sessions.append(self._create_data_point_from_segment(
-                            data_frames, sampling_rates, measurement_start_time,
-                            label=ActivityLabel.CYCLING, end_tag=tag_end
-                        ))
-                    else:
-                        cycle_tag_end = tags['tag'].iloc[-1]
-                        # Cycling session
-                        sessions.append(self._create_data_point_from_segment(
-                            data_frames, sampling_rates, measurement_start_time,
-                            label=ActivityLabel.CYCLING, end_tag=cycle_tag_end
-                        ))
-                        # Resting session
-                        sessions.append(self._create_data_point_from_segment(
-                            data_frames, sampling_rates, measurement_start_time,
-                            label=ActivityLabel.RESTING, start_tag=cycle_tag_end
-                        ))
-                elif subject_protocol_version == "f":
-                    cycle_tag_end = tags['tag'].iloc[-2]
-                    rest_tag_end = tags['tag'].iloc[-1]
-                    # Cycling session
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.CYCLING, end_tag=cycle_tag_end
-                    ))
-                    # Resting session
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.RESTING, start_tag=cycle_tag_end, end_tag=rest_tag_end
-                    ))
-            elif subject_exercise_type == "STRESS":
-                if subject_protocol_version == "S":
-                    baseline_tag_start = tags['tag'].iloc[0]
-                    baseline_tag_end = tags['tag'].iloc[1]
-                    stress1_tag_start = tags['tag'].iloc[2]
-                    stress1_tag_end = tags['tag'].iloc[3]
-                    rest1_tag_end = tags['tag'].iloc[4]
-                    stress2_tag_end = tags['tag'].iloc[5]
-                    rest2_tag_end = tags['tag'].iloc[6]
-                    stress3_tag_end = tags['tag'].iloc[7]
-                    stress4_tag_start = tags['tag'].iloc[8]
-                    stress4_tag_end = tags['tag'].iloc[9]
-                    stress5_tag_start = tags['tag'].iloc[10]
-                    stress5_tag_end = tags['tag'].iloc[11]
-
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.RESTING, start_tag=baseline_tag_start, end_tag=baseline_tag_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress1_tag_start, end_tag=stress1_tag_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.RESTING, start_tag=stress1_tag_end, end_tag=rest1_tag_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.COGNITIVE_TASK, start_tag=rest1_tag_end, end_tag=stress2_tag_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.RESTING, start_tag=stress2_tag_end, end_tag=rest2_tag_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.COGNITIVE_TASK, start_tag=rest2_tag_end, end_tag=stress3_tag_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress4_tag_start, end_tag=stress4_tag_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress5_tag_start, end_tag=stress5_tag_end
-                    ))
-                elif subject_protocol_version == "f":
-                    if subject_dir_name == "f07":
-                        # special subject
-                        valid_df = {
-                            SensorType.EDA: data_frames[SensorType.EDA],
-                            SensorType.ACC_WRIST_LEFT: data_frames[SensorType.ACC_WRIST_LEFT]
-                        }
-                        data_frames = valid_df
-
-                    baseline_end = tags['tag'].iloc[0]
-                    stress1_start = tags['tag'].iloc[1]
-                    stress1_end = tags['tag'].iloc[2]
-                    rest1_end = tags['tag'].iloc[3]
-                    stress2_end = tags['tag'].iloc[4]
-                    stress3_start = tags['tag'].iloc[5]
-                    stress3_end = tags['tag'].iloc[6]
-                    rest2_end = tags['tag'].iloc[7]
-                    stress4_end = tags['tag'].iloc[8]
-
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.RESTING, end_tag=baseline_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress1_start, end_tag=stress1_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.RESTING, start_tag=stress1_end, end_tag=rest1_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.COGNITIVE_TASK, start_tag=rest1_end, end_tag=stress2_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.COGNITIVE_TASK, start_tag=stress3_start, end_tag=stress3_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.RESTING, start_tag=stress3_end, end_tag=rest2_end
-                    ))
-                    sessions.append(self._create_data_point_from_segment(
-                        data_frames, sampling_rates, measurement_start_time,
-                        label=ActivityLabel.COGNITIVE_TASK, start_tag=rest2_end, end_tag=stress4_end
-                    ))
+            # Delegate to the correct processor based on exercise type
+            if exercise_type == "STRESS":
+                sessions.extend(self._process_stress(data_frames, start_time, tags, subject_dir_name))
+            else:
+                sessions.extend(self._process_aerobic_and_anaerobic(data_frames, start_time, tags, subject_dir_name, exercise_type))
 
         return sessions
+
 
 
 if __name__ == "__main__":
