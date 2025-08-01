@@ -1,6 +1,6 @@
 import numpy as np
 from collections import defaultdict
-from datasets import DataPoint, SensorType, ActivityLabel
+from datasets import DataPoint, Sensor, ActivityLabel
 import torch
 
 class ZScoreNormalizer:

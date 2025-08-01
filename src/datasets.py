@@ -1,10 +1,11 @@
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum, auto
 from typing import List, Dict, Tuple
 from scipy import signal
 from datetime import datetime
+from sensors import SensorFrequency, Sensor, SENSOR_AXES_MAP
+from enum import Enum, auto
 
 import numpy as np
 import torch
@@ -12,45 +13,6 @@ import wget
 import tempfile
 import zipfile
 import pandas as pd
-
-
-
-
-class SensorType(Enum):
-    """
-    Enum class for sensor types. Contains a combination of sensor and location on body.
-    When left/right is not specified, default is right.
-    Consider ACC and GYRO on waist and hip as the same type because they shouldn't differ much.
-    """
-    ACC_BACK_LOWER = auto()
-    ACC_THIGH_RIGHT = auto()
-    ACC_WRIST_RIGHT = auto()
-    ACC_WRIST_LEFT = auto()
-    ACC_ANKLE_LEFT = auto()
-    ACC_ANKLE_RIGHT = auto()
-    ACC_CHEST = auto()
-    ACC_TROUSER_FRONT_POCKET_RIGHT = auto()
-    ACC_TROUSER_FRONT_POCKET_LEFT = auto()
-    ACC_HIP_LEFT = auto()
-    ACC_HIP_RIGHT = auto()
-    ACC_ARM_LOWER_RIGHT= auto(),
-    EDA = auto()
-    HR = auto()
-    BVP = auto()
-    TEMP_BODY = auto()
-    TEMP_SKIN = auto()
-    IBI = auto()
-    GYRO_WRIST_RIGHT = auto()
-    GYRO_WRIST_LEFT = auto()
-    GYRO_ANKLE_LEFT = auto()
-    GYRO_ANKLE_RIGHT = auto()
-    GYRO_CHEST = auto()
-    GYRO_TROUSER_FRONT_POCKET = auto()
-    GYRO_HIP_RIGHT = auto()
-    GYRO_ARM_LOWER_RIGHT = auto()
-    ECG_CHEST = auto()
-    MAGNETOMETER_ANKLE_LEFT = auto()
-    MAGNETOMETER_ARM_LOWER_RIGHT = auto()
 
 
 class ActivityLabel(Enum):
@@ -76,42 +38,6 @@ class ActivityLabel(Enum):
     COGNITIVE_TASK = auto()
 
 
-# Specifies how many axes each sensor type have
-SENSOR_AXES_MAP = {
-    SensorType.ACC_BACK_LOWER: 3,
-    SensorType.ACC_THIGH_RIGHT: 3,
-    SensorType.ACC_WRIST_RIGHT: 3,
-    SensorType.ACC_WRIST_LEFT: 3,
-    SensorType.ACC_ANKLE_LEFT: 3,
-    SensorType.ACC_ANKLE_RIGHT: 3,
-    SensorType.ACC_CHEST: 3,
-    SensorType.ACC_TROUSER_FRONT_POCKET_RIGHT: 3,
-    SensorType.ACC_TROUSER_FRONT_POCKET_LEFT: 3,
-    SensorType.ACC_HIP_LEFT: 3,
-    SensorType.ACC_HIP_RIGHT: 3,
-    SensorType.ACC_ARM_LOWER_RIGHT: 3,
-    SensorType.GYRO_WRIST_RIGHT: 3,
-    SensorType.GYRO_WRIST_LEFT: 3,
-    SensorType.GYRO_ANKLE_LEFT: 3,
-    SensorType.GYRO_ANKLE_RIGHT: 3,
-    SensorType.GYRO_CHEST: 3,
-    SensorType.GYRO_TROUSER_FRONT_POCKET: 3,
-    SensorType.GYRO_HIP_RIGHT: 3,
-    SensorType.GYRO_ARM_LOWER_RIGHT: 3,
-    SensorType.MAGNETOMETER_ANKLE_LEFT: 3,
-    SensorType.MAGNETOMETER_ARM_LOWER_RIGHT: 3,
-
-    SensorType.ECG_CHEST: 2,
-
-    SensorType.EDA: 1,
-    SensorType.HR: 1,
-    SensorType.BVP: 1,
-    SensorType.TEMP_BODY: 1,
-    SensorType.TEMP_SKIN: 1,
-    SensorType.IBI: 1,
-}
-
-
 # Specifies the standard sampling rate for all sensors
 TARGET_SAMPLING_RATE = 50
 
@@ -127,8 +53,8 @@ class DataPoint:
     - ``sampling_rate``: Indicates the original sampling rate for each sensor in ``sensors``.
     - ``label``: The activity classification label.
     """
-    sensors: Dict[SensorType, np.ndarray]
-    sampling_rate: Dict[SensorType, int]
+    sensors: Dict[Sensor, np.ndarray]
+    sampling_rate: Dict[Sensor, int]
     label: ActivityLabel
 
     def __post_init__(self):
@@ -348,8 +274,8 @@ class HARTHDataset(HARBaseDataset):
     }
 
     SAMPLING_RATES = {
-        SensorType.ACC_BACK_LOWER: 50,
-        SensorType.ACC_THIGH_RIGHT: 50,
+        Sensor.ACC_BACK_LOWER: 50,
+        Sensor.ACC_THIGH_RIGHT: 50,
     }
 
     def read(self, full_path):
@@ -369,8 +295,54 @@ class HARTHDataset(HARBaseDataset):
                 label = session_df['label'].iloc[0]
                 if isinstance(label, ActivityLabel):
                     sensors = {
-                        SensorType.ACC_BACK_LOWER: session_df[['back_x', 'back_y', 'back_z']].to_numpy().T,
-                        SensorType.ACC_THIGH_RIGHT: session_df[['thigh_x', 'thigh_y', 'thigh_z']].to_numpy().T
+                        Sensor.ACC_BACK_LOWER: session_df[['back_x', 'back_y', 'back_z']].to_numpy().T,
+                        Sensor.ACC_THIGH_RIGHT: session_df[['thigh_x', 'thigh_y', 'thigh_z']].to_numpy().T
+                    }
+
+                    sessions.append(DataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
+
+        return sessions
+
+class HAR70Dataset(HARBaseDataset):
+    # https://archive.ics.uci.edu/dataset/780/har70
+    _DIR_NAME = 'HAR70'
+    _DOWNLOAD_URL = 'https://archive.ics.uci.edu/static/public/780/har70.zip'
+    _INTERNAL_FOLDER = 'har70plus'
+
+    LABEL_MAPPING = {
+        1: ActivityLabel.WALKING,
+        3: ActivityLabel.SHUFFLING,
+        4: ActivityLabel.WALKING_UPSTAIR,
+        5: ActivityLabel.WALKING_DOWNSTAIR,
+        6: ActivityLabel.STANDING,
+        7: ActivityLabel.SITTING,
+        8: ActivityLabel.LYING,
+    }
+
+    SAMPLING_RATES = {
+        Sensor.ACC_BACK_LOWER: 50,
+        Sensor.ACC_THIGH_RIGHT: 50,
+    }
+
+    def read(self, full_path):
+        subject_folder = os.path.join(full_path, self._INTERNAL_FOLDER)
+        target_subjects = self._get_target_subjects(subject_folder)
+
+        sessions = []
+
+        for subject in target_subjects:
+            file_path = os.path.join(subject_folder, subject)
+            print(file_path)
+
+            df = pd.read_csv(file_path)
+            df['label'] = df['label'].map(self.LABEL_MAPPING)
+
+            for _, session_df in self._group_by_activity(df):
+                label = session_df['label'].iloc[0]
+                if isinstance(label, ActivityLabel):
+                    sensors = {
+                        Sensor.ACC_BACK_LOWER: session_df[['back_x', 'back_y', 'back_z']].to_numpy().T,
+                        Sensor.ACC_THIGH_RIGHT: session_df[['thigh_x', 'thigh_y', 'thigh_z']].to_numpy().T
                     }
 
                     sessions.append(DataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
@@ -399,14 +371,14 @@ class MHEALTHDataset(HARBaseDataset):
     }
 
     SAMPLING_RATES = {
-        SensorType.ACC_CHEST: 50,
-        SensorType.ECG_CHEST: 50,
-        SensorType.ACC_ANKLE_LEFT: 50,
-        SensorType.GYRO_ANKLE_LEFT: 50,
-        SensorType.MAGNETOMETER_ANKLE_LEFT: 50,
-        SensorType.ACC_ARM_LOWER_RIGHT: 50,
-        SensorType.GYRO_ARM_LOWER_RIGHT: 50,
-        SensorType.MAGNETOMETER_ARM_LOWER_RIGHT: 50
+        Sensor.ACC_CHEST: 50,
+        Sensor.ECG_CHEST: 50,
+        Sensor.ACC_ANKLE_LEFT: 50,
+        Sensor.GYRO_ANKLE_LEFT: 50,
+        Sensor.MAGNETOMETER_ANKLE_LEFT: 50,
+        Sensor.ACC_ARM_LOWER_RIGHT: 50,
+        Sensor.GYRO_ARM_LOWER_RIGHT: 50,
+        Sensor.MAGNETOMETER_ARM_LOWER_RIGHT: 50
     }
 
     COLUMN_NAMES = ['acc_chest_x', 'acc_chest_y', 'acc_chest_z', 'ecg_1', 'ecg_2',
@@ -435,14 +407,14 @@ class MHEALTHDataset(HARBaseDataset):
                 label = session_df['label'].iloc[0]
                 if isinstance(label, ActivityLabel):
                     sensors = {
-                        SensorType.ACC_CHEST: session_df[['acc_chest_x', 'acc_chest_y', 'acc_chest_z']].to_numpy().T,
-                        SensorType.ECG_CHEST: session_df[['ecg_1', 'ecg_2']].to_numpy().T,
-                        SensorType.ACC_ANKLE_LEFT: session_df[['acc_ankle_left_x', 'acc_ankle_left_y', 'acc_ankle_left_z']].to_numpy().T,
-                        SensorType.GYRO_ANKLE_LEFT: session_df[['gyro_ankle_left_x', 'gyro_ankle_left_y', 'gyro_ankle_left_z']].to_numpy().T,
-                        SensorType.MAGNETOMETER_ANKLE_LEFT: session_df[['mag_ankle_left_x', 'mag_ankle_left_y', 'mag_ankle_left_z']].to_numpy().T,
-                        SensorType.ACC_ARM_LOWER_RIGHT: session_df[['acc_right_lower_arm_x', 'acc_right_lower_arm_y', 'acc_right_lower_arm_z']].to_numpy().T,
-                        SensorType.GYRO_ARM_LOWER_RIGHT: session_df[['gyro_right_lower_arm_x', 'gyro_right_lower_arm_y', 'gyro_right_lower_arm_z']].to_numpy().T,
-                        SensorType.MAGNETOMETER_ARM_LOWER_RIGHT: session_df[['mag_right_lower_arm_x', 'mag_right_lower_arm_y', 'mag_right_lower_arm_z']].to_numpy().T
+                        Sensor.ACC_CHEST: session_df[['acc_chest_x', 'acc_chest_y', 'acc_chest_z']].to_numpy().T,
+                        Sensor.ECG_CHEST: session_df[['ecg_1', 'ecg_2']].to_numpy().T,
+                        Sensor.ACC_ANKLE_LEFT: session_df[['acc_ankle_left_x', 'acc_ankle_left_y', 'acc_ankle_left_z']].to_numpy().T,
+                        Sensor.GYRO_ANKLE_LEFT: session_df[['gyro_ankle_left_x', 'gyro_ankle_left_y', 'gyro_ankle_left_z']].to_numpy().T,
+                        Sensor.MAGNETOMETER_ANKLE_LEFT: session_df[['mag_ankle_left_x', 'mag_ankle_left_y', 'mag_ankle_left_z']].to_numpy().T,
+                        Sensor.ACC_ARM_LOWER_RIGHT: session_df[['acc_right_lower_arm_x', 'acc_right_lower_arm_y', 'acc_right_lower_arm_z']].to_numpy().T,
+                        Sensor.GYRO_ARM_LOWER_RIGHT: session_df[['gyro_right_lower_arm_x', 'gyro_right_lower_arm_y', 'gyro_right_lower_arm_z']].to_numpy().T,
+                        Sensor.MAGNETOMETER_ARM_LOWER_RIGHT: session_df[['mag_right_lower_arm_x', 'mag_right_lower_arm_y', 'mag_right_lower_arm_z']].to_numpy().T
                     }
 
                     sessions.append(DataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
@@ -457,11 +429,11 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
     _INTERNAL_FOLDER = "wearable-device-dataset-from-induced-stress-and-structured-exercise-sessions-1.0.1"
 
     SAMPLING_RATES = {
-        SensorType.ACC_WRIST_LEFT: 32,
-        SensorType.BVP: 64,
-        SensorType.EDA: 4,
-        SensorType.HR: 1,
-        SensorType.TEMP_SKIN: 4
+        Sensor.ACC_WRIST_LEFT: 32,
+        Sensor.BVP: 64,
+        Sensor.EDA: 4,
+        Sensor.HR: 1,
+        Sensor.TEMP_SKIN: 4
     }
 
     def _get_all_subjects_paths(self, full_path) -> List[Tuple[str, str]]:
@@ -533,9 +505,9 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
 
         return data_df.iloc[start_index:end_index]
 
-    def _create_data_point(self, data_frames: Dict[SensorType, pd.DataFrame],
-                                        measurement_start_time: str, label: ActivityLabel,
-                                        start_tag: str = None, end_tag: str = None) -> DataPoint:
+    def _create_data_point(self, data_frames: Dict[Sensor, pd.DataFrame],
+                           measurement_start_time: str, label: ActivityLabel,
+                           start_tag: str = None, end_tag: str = None) -> DataPoint:
         """
         Segments all sensor dataframes and creates a DataPoint.
         """
@@ -574,8 +546,8 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
             # Handle special subject with only 2 sensors
             if subject_dir_name == "f07":
                 valid_dataframes = {
-                    SensorType.EDA: data_frames[SensorType.EDA],
-                    SensorType.ACC_WRIST_LEFT: data_frames[SensorType.ACC_WRIST_LEFT]
+                    Sensor.EDA: data_frames[Sensor.EDA],
+                    Sensor.ACC_WRIST_LEFT: data_frames[Sensor.ACC_WRIST_LEFT]
                 }
                 data_frames = valid_dataframes
 
@@ -658,11 +630,11 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
             acc_df.columns = ['x', 'y', 'z']
 
             data_frames = {
-                SensorType.ACC_WRIST_LEFT: acc_df,
-                SensorType.BVP: pd.read_csv(os.path.join(subject_dir, "BVP.csv"), names=['bvp']),
-                SensorType.EDA: pd.read_csv(os.path.join(subject_dir, "EDA.csv"), names=['eda']),
-                SensorType.HR: pd.read_csv(os.path.join(subject_dir, "HR.csv"), names=['hr']),
-                SensorType.TEMP_SKIN: pd.read_csv(os.path.join(subject_dir, "TEMP.csv"), names=['temp'])
+                Sensor.ACC_WRIST_LEFT: acc_df,
+                Sensor.BVP: pd.read_csv(os.path.join(subject_dir, "BVP.csv"), names=['bvp']),
+                Sensor.EDA: pd.read_csv(os.path.join(subject_dir, "EDA.csv"), names=['eda']),
+                Sensor.HR: pd.read_csv(os.path.join(subject_dir, "HR.csv"), names=['hr']),
+                Sensor.TEMP_SKIN: pd.read_csv(os.path.join(subject_dir, "TEMP.csv"), names=['temp'])
             }
             tags = pd.read_csv(os.path.join(subject_dir, "tags.csv"), header=None, names=['tag'])
             subject_dir_name = os.path.basename(subject_dir)
@@ -684,4 +656,6 @@ if __name__ == "__main__":
                            validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
     dataset3 = InducedStressStructuredExerciseWearableDeviceDataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
                               validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
+    dataset4 = HAR70Dataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
+                            validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
 
