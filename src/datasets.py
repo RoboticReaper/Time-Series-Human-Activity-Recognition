@@ -1,7 +1,7 @@
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Union
 from scipy import signal
 from datetime import datetime
 from sensors import SensorFrequency, Sensor, SENSOR_AXES_MAP
@@ -43,9 +43,9 @@ TARGET_SAMPLING_RATE = 50
 
 
 @dataclass
-class DataPoint:
+class NumpyDataPoint:
     """
-    A dataclass to hold a single sample of sensor data and the label.
+    A dataclass to hold a single sample of sensor data as NumPy arrays, and the label.
 
     Values:
 
@@ -62,6 +62,28 @@ class DataPoint:
         Validates the shape of sensor data after initialization.
         Also validates that sensors and sampling_rate have matching dictionary keys.
         """
+        for sensor_type, data in self.sensors.items():
+            if sensor_type not in SENSOR_AXES_MAP:
+                raise ValueError(f"Sensor type {sensor_type} is not supported.")
+
+            expected_axes = SENSOR_AXES_MAP[sensor_type]
+            if data.ndim != 2 or data.shape[0] != expected_axes:
+                raise ValueError(f"Incorrect shape for sensor type {sensor_type.name}."
+                                 f"Expected ({expected_axes}, n_timesteps) but got {data.shape}")
+
+        if set(self.sensors.keys()) != set(self.sampling_rate.keys()):
+            raise ValueError(f"Sensor labels and sensor sampling rates do not match keys.")
+
+
+@dataclass
+class TorchDataPoint(NumpyDataPoint):
+    """
+    A dataclass to hold sensor data as PyTorch Tensors instead of NumPy array like DataPoint. Everything else is the same
+    """
+    sensors: Dict[Sensor, torch.Tensor]
+
+    def __post_init__(self):
+        # Although logic is the same as DataPoint, it's best practice to make the behavior explicit and self contained
         for sensor_type, data in self.sensors.items():
             if sensor_type not in SENSOR_AXES_MAP:
                 raise ValueError(f"Sensor type {sensor_type} is not supported.")
@@ -150,9 +172,25 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
         self._resample(long_data_sessions)
 
         print(f"Creating fixed windows.")
-        self.data = self._create_windows(long_data_sessions, window_size, stride)
+        np_data = self._create_windows(long_data_sessions, window_size, stride)
+
+        # Convert numpy datapoint to pytorch datapoint
+        self.data = self._np_datapoints_to_torch_datapoints(np_data)
 
         self.size = len(self.data)
+
+    def _np_datapoints_to_torch_datapoints(self, np_datapoints: List[NumpyDataPoint]) -> List[TorchDataPoint]:
+        torch_datapoints = []
+
+        for datapoint in np_datapoints:
+            sensors = {
+                sensor: torch.from_numpy(data)
+                for sensor, data in datapoint.sensors.items()
+            }
+
+            torch_datapoints.append(TorchDataPoint(sensors=sensors, sampling_rate=datapoint.sampling_rate, label=datapoint.label))
+
+        return torch_datapoints
 
     def _group_by_activity(self, df: pd.DataFrame):
         """Splits a DataFrame into groups of consecutive identical activities."""
@@ -183,7 +221,7 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
 
         return selected_subjects
 
-    def _resample(self, long_data_sessions: List[DataPoint]):
+    def _resample(self, long_data_sessions: List[NumpyDataPoint]):
         """
         Resample the long sessions according to the target sampling rate. Modifies ``long_data_sessions``
         """
@@ -200,7 +238,7 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
                 dp.sensors[sensor_type] = signal.resample(x=sensor_data, num=new_timesteps, axis=1)
                 dp.sampling_rate[sensor_type] = TARGET_SAMPLING_RATE
 
-    def _create_windows(self, long_data_sessions: List[DataPoint], window_size, stride):
+    def _create_windows(self, long_data_sessions: List[NumpyDataPoint], window_size, stride) -> List[NumpyDataPoint]:
         """
         Uses a sliding window technique to ensure all ``DataPoint`` samples span the same length of time.
         """
@@ -213,7 +251,7 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
                 windowed_sensors = {st: data[:, i: i + window_size] for st, data in session.sensors.items()}
                 if not all(d.shape[1] == window_size for d in windowed_sensors.values()):
                     continue  # Skip windows that aren't full size
-                windowed_data.append(DataPoint(
+                windowed_data.append(NumpyDataPoint(
                     sensors=windowed_sensors,
                     sampling_rate=session.sampling_rate,
                     label=session.label
@@ -232,7 +270,7 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
         print(f"Download complete. Dataset is in {full_path}")
 
     @abstractmethod
-    def read(self, full_path) -> List[DataPoint]:
+    def read(self, full_path) -> List[NumpyDataPoint]:
         """
         Handles loading the files into long, continuous sessions.
 
@@ -240,7 +278,7 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
         """
         pass
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> TorchDataPoint:
         sample = self.data[idx]
         if self.transform:
             sample = self.transform(sample)
@@ -299,7 +337,7 @@ class HARTHDataset(HARBaseDataset):
                         Sensor.ACC_THIGH_RIGHT: session_df[['thigh_x', 'thigh_y', 'thigh_z']].to_numpy().T
                     }
 
-                    sessions.append(DataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
+                    sessions.append(NumpyDataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
 
         return sessions
 
@@ -345,7 +383,7 @@ class HAR70Dataset(HARBaseDataset):
                         Sensor.ACC_THIGH_RIGHT: session_df[['thigh_x', 'thigh_y', 'thigh_z']].to_numpy().T
                     }
 
-                    sessions.append(DataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
+                    sessions.append(NumpyDataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
 
         return sessions
 
@@ -390,7 +428,7 @@ class MHEALTHDataset(HARBaseDataset):
                     'mag_right_lower_arm_x', 'mag_right_lower_arm_y', 'mag_right_lower_arm_z', 'label'
                     ]
 
-    def read(self, full_path) -> List[DataPoint]:
+    def read(self, full_path) -> List[NumpyDataPoint]:
         subject_folder = os.path.join(full_path, self._INTERNAL_FOLDER)
         target_subjects = self._get_target_subjects(subject_folder, ignored_files=["README.txt"])
 
@@ -417,7 +455,7 @@ class MHEALTHDataset(HARBaseDataset):
                         Sensor.MAGNETOMETER_ARM_LOWER_RIGHT: session_df[['mag_right_lower_arm_x', 'mag_right_lower_arm_y', 'mag_right_lower_arm_z']].to_numpy().T
                     }
 
-                    sessions.append(DataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
+                    sessions.append(NumpyDataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
 
         return sessions
 
@@ -507,7 +545,7 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
 
     def _create_data_point(self, data_frames: Dict[Sensor, pd.DataFrame],
                            measurement_start_time: str, label: ActivityLabel,
-                           start_tag: str = None, end_tag: str = None) -> DataPoint:
+                           start_tag: str = None, end_tag: str = None) -> NumpyDataPoint:
         """
         Segments all sensor dataframes and creates a DataPoint.
         """
@@ -517,7 +555,7 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
             segmented_df = self._get_rows_between_tags(df, freq, measurement_start_time, start_tag, end_tag)
             segmented_sensors[sensor_type] = segmented_df.to_numpy().T
 
-        return DataPoint(
+        return NumpyDataPoint(
             sensors=segmented_sensors,
             sampling_rate=self.SAMPLING_RATES.copy(),
             label=label
@@ -619,11 +657,12 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
 
         return sessions
 
-    def read(self, full_path: str) -> List[DataPoint]:
+    def read(self, full_path: str) -> List[NumpyDataPoint]:
         target_subjects = self._get_target_subjects(full_path)
         sessions = []
 
         for subject_dir, exercise_type in target_subjects:
+            print(subject_dir)
             # Load all data files for the subject
             acc_df = pd.read_csv(os.path.join(subject_dir, "ACC.csv"))
             start_time = str(acc_df.columns[0])
@@ -650,12 +689,23 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
 
 
 if __name__ == "__main__":
-    dataset1 = HARTHDataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
-                           validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
-    dataset2 = MHEALTHDataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
-                           validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
-    dataset3 = InducedStressStructuredExerciseWearableDeviceDataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
-                              validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
-    dataset4 = HAR70Dataset(train_mode=True, train_split_ratio=0.8, validation_split_ratio=0.1,
-                            validation_mode=False, test_mode=False, window_size=60, stride=60, seed=42)
+    window_size = 250
+    stride = 100
+    seed = 42
+    train_split_ratio = 0.8
+    validation_split_ratio = 0.1
+    n_fft = 50
+    hop_length = 25
+    win_length = 50
+
+
+
+    dataset1 = HARTHDataset(train_mode=True, train_split_ratio=train_split_ratio, validation_split_ratio=validation_split_ratio,
+                           validation_mode=False, test_mode=False, window_size=window_size, stride=stride, seed=seed)
+    dataset2 = MHEALTHDataset(train_mode=True, train_split_ratio=train_split_ratio, validation_split_ratio=validation_split_ratio,
+                           validation_mode=False, test_mode=False, window_size=window_size, stride=stride, seed=seed)
+    dataset3 = InducedStressStructuredExerciseWearableDeviceDataset(train_mode=True, train_split_ratio=train_split_ratio, validation_split_ratio=validation_split_ratio,
+                           validation_mode=False, test_mode=False, window_size=window_size, stride=stride, seed=seed)
+    dataset4 = HAR70Dataset(train_mode=True, train_split_ratio=train_split_ratio, validation_split_ratio=validation_split_ratio,
+                           validation_mode=False, test_mode=False, window_size=window_size, stride=stride, seed=seed)
 
