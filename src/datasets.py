@@ -81,9 +81,10 @@ class TorchDataPoint(NumpyDataPoint):
     A dataclass to hold sensor data as PyTorch Tensors instead of NumPy array like DataPoint. Everything else is the same
     """
     sensors: Dict[Sensor, torch.Tensor]
+    already_transformed: Dict[Sensor, bool] # to keep track of caching to avoid re-transforming
 
     def __post_init__(self):
-        # Although logic is the same as DataPoint, it's best practice to make the behavior explicit and self contained
+        # Although logic is the same as DataPoint, it's best practice to make the behavior explicit and self-contained
         for sensor_type, data in self.sensors.items():
             if sensor_type not in SENSOR_AXES_MAP:
                 raise ValueError(f"Sensor type {sensor_type} is not supported.")
@@ -184,11 +185,14 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
 
         for datapoint in np_datapoints:
             sensors = {
-                sensor: torch.from_numpy(data)
+                sensor: torch.from_numpy(data).float()
                 for sensor, data in datapoint.sensors.items()
             }
 
-            torch_datapoints.append(TorchDataPoint(sensors=sensors, sampling_rate=datapoint.sampling_rate, label=datapoint.label))
+            already_transformed = {sensor: False for sensor in sensors.keys()}
+
+            torch_datapoints.append(TorchDataPoint(sensors=sensors, sampling_rate=datapoint.sampling_rate, label=datapoint.label,
+                                                   already_transformed=already_transformed))
 
         return torch_datapoints
 
@@ -280,10 +284,12 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
 
     def __getitem__(self, idx) -> TorchDataPoint:
         sample = self.data[idx]
+
         if self.transform:
             sample = self.transform(sample)
 
         return sample
+
 
     def __len__(self):
         return self.size
