@@ -173,7 +173,7 @@ class StatFeaturesZScoreNormalizer(BaseZScoreNormalizer):
 
     def __call__(self, features: torch.Tensor) -> torch.Tensor:
         """
-        Validates and normalizes a statistical features tensor.
+        Validates and normalizes a statistical-features tensor.
 
         Args:
             features (torch.Tensor): A 2D tensor with shape (axes, num_features).
@@ -244,19 +244,58 @@ def _fit_spectrogram_z_normalizer(dataset, transform: STFTTransform):
     """
     Calculates the mean and std for each frequency bin across the entire dataset for high frequency sensors.
     """
-    # TODO: complete this function
-    pass
+    all_spectrograms_by_sensor = defaultdict(list)
+    print("Generating spectrograms for stats calculation...")
+
+    for i in tqdm(range(len(dataset))):
+        data_point = dataset[i]
+        for sensor, sensor_data in data_point.sensors.items():
+            if sensor.frequency == SensorFrequency.HIGH:
+                spectrogram = transform(sensor_data)
+                all_spectrograms_by_sensor[sensor].append(spectrogram)
+
+    stats_dict = {}
+    print("\nCalculating spectrogram statistics per sensor...")
+    for sensor, spec_list in all_spectrograms_by_sensor.items():
+        full_tensor = torch.stack(spec_list, dim=0)
+        mean = torch.mean(full_tensor, dim=(0, 1, 3))
+        std = torch.std(full_tensor, dim=(0, 1, 3))
+        stats_dict[sensor] = {'mean': mean, 'std': std}
+        print(f"  - {sensor.name}: stats calculated.")
+
+    return stats_dict
 
 
 def _fit_stat_features_z_normalizer(dataset, transform: StatFeaturesTransform):
     """
     Calculates the mean and std for each statistical feature across the entire dataset for low frequency sensors.
     """
-    # TODO: complete this function
-    pass
+    all_features_by_sensor = defaultdict(list)
+    print("Generating statistical features for stats calculation...")
+    for i in tqdm(range(len(dataset))):
+        data_point = dataset[i]
+        for sensor, sensor_data in data_point.sensors.items():
+            if sensor.frequency == SensorFrequency.LOW:
+                features = transform(sensor_data)
+                all_features_by_sensor[sensor].append(features)
+
+    stats_dict = {}
+    print("\nCalculating feature statistics per sensor...")
+    for sensor, features_list in all_features_by_sensor.items():
+        # Shape of each item in list: (axes, num_features)
+        full_tensor = torch.stack(features_list, dim=0)
+        # Resulting shape: (num_samples, axes, num_features)
+
+        # Calculate stats over batch and axes dimensions (0 and 1)
+        mean = torch.mean(full_tensor, dim=(0, 1))
+        std = torch.std(full_tensor, dim=(0, 1))
+        stats_dict[sensor] = {'mean': mean, 'std': std}
+        print(f"  - {sensor.name}: stats calculated.")
+
+    return stats_dict
 
 
-def _create_normalizers_dict(stats_dict: Dict[Sensor, Dict[str, torch.Tensor]], NormalizerClass: Type[BaseZScoreNormalizer]) -> Dict[Sensor, Type[BaseZScoreNormalizer]]:
+def _create_normalizers_dict(stats_dict: Dict[Sensor, Dict[str, torch.Tensor]], NormalizerClass: Type[BaseZScoreNormalizer]):
     """
     Creates a dictionary of initialized normalizer objects from a dictionary of stats.
 
@@ -296,6 +335,14 @@ def create_conditional_transform(dataset: torch.utils.data.Dataset, n_fft, hop_l
                 if not isinstance(d, HARBaseDataset):
                     raise TypeError(f"The passed ConcatDataset contains type {type(d)} that's not HARBaseDataset.")
 
-    # TODO: complete this function
-    pass
+    stft_transform = STFTTransform(n_fft=n_fft, hop_length=hop_length, win_length=win_length)
+    stat_features_transform = StatFeaturesTransform()
+    stft_fit = _fit_spectrogram_z_normalizer(dataset, stft_transform)
+    stat_features_fit = _fit_stat_features_z_normalizer(dataset, stat_features_transform)
+    spectrogram_normalizers = _create_normalizers_dict(stft_fit, SpectrogramZScoreNormalizer)
+    stat_features_normalizers = _create_normalizers_dict(stat_features_fit, StatFeaturesZScoreNormalizer)
 
+    conditional_transform = ConditionalTransform(stft_transform=stft_transform, stat_features_transform=stat_features_transform,
+                                spectrogram_normalizers=spectrogram_normalizers, stat_features_normalizers=stat_features_normalizers)
+
+    return conditional_transform
