@@ -4,8 +4,12 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Union
 from scipy import signal
 from datetime import datetime
+
+from torch.utils.data import ConcatDataset
+
 from sensors import SensorFrequency, Sensor, SENSOR_AXES_MAP
 from enum import Enum, auto
+from utils import create_conditional_transform
 
 import numpy as np
 import torch
@@ -715,3 +719,6 @@ if __name__ == "__main__":
     dataset4 = HAR70Dataset(train_mode=True, train_split_ratio=train_split_ratio, validation_split_ratio=validation_split_ratio,
                            validation_mode=False, test_mode=False, window_size=window_size, stride=stride, seed=seed)
 
+    full_data = ConcatDataset([dataset1, dataset2, dataset3, dataset4])
+    transform = create_conditional_transform(full_data, n_fft, hop_length, win_length)
+    full_data.transform = transform

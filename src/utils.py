@@ -2,10 +2,9 @@ from collections import defaultdict
 
 import torch
 from tqdm import tqdm
-from torch.utils.data import ConcatDataset
 from sensors import SensorFrequency, Sensor
-from datasets import HARBaseDataset, TorchDataPoint
 from typing import Dict, Type
+
 
 
 class STFTTransform:
@@ -213,7 +212,8 @@ class ConditionalTransform:
         self.stat_features_normalizers = stat_features_normalizers
 
 
-    def __call__(self, datapoint: TorchDataPoint):
+    def __call__(self, datapoint):
+        """datapoint is a TorchDataPoint."""
         for sensor, data in list(datapoint.sensors.items()):
             if datapoint.already_transformed.get(sensor, False):
                 continue
@@ -245,7 +245,7 @@ def _fit_spectrogram_z_normalizer(dataset, transform: STFTTransform):
     Calculates the mean and std for each frequency bin across the entire dataset for high frequency sensors.
     """
     all_spectrograms_by_sensor = defaultdict(list)
-    print("Generating spectrograms for stats calculation...")
+    print("\n\nGenerating spectrograms for stats calculation...")
 
     for i in tqdm(range(len(dataset))):
         data_point = dataset[i]
@@ -255,7 +255,7 @@ def _fit_spectrogram_z_normalizer(dataset, transform: STFTTransform):
                 all_spectrograms_by_sensor[sensor].append(spectrogram)
 
     stats_dict = {}
-    print("\nCalculating spectrogram statistics per sensor...")
+    print("Calculating spectrogram statistics per sensor...")
     for sensor, spec_list in all_spectrograms_by_sensor.items():
         full_tensor = torch.stack(spec_list, dim=0)
         mean = torch.mean(full_tensor, dim=(0, 1, 3))
@@ -271,7 +271,7 @@ def _fit_stat_features_z_normalizer(dataset, transform: StatFeaturesTransform):
     Calculates the mean and std for each statistical feature across the entire dataset for low frequency sensors.
     """
     all_features_by_sensor = defaultdict(list)
-    print("Generating statistical features for stats calculation...")
+    print("\n\nGenerating statistical features for stats calculation...")
     for i in tqdm(range(len(dataset))):
         data_point = dataset[i]
         for sensor, sensor_data in data_point.sensors.items():
@@ -280,7 +280,7 @@ def _fit_stat_features_z_normalizer(dataset, transform: StatFeaturesTransform):
                 all_features_by_sensor[sensor].append(features)
 
     stats_dict = {}
-    print("\nCalculating feature statistics per sensor...")
+    print("Calculating feature statistics per sensor...")
     for sensor, features_list in all_features_by_sensor.items():
         # Shape of each item in list: (axes, num_features)
         full_tensor = torch.stack(features_list, dim=0)
@@ -327,13 +327,6 @@ def create_conditional_transform(dataset: torch.utils.data.Dataset, n_fft, hop_l
     Returns:
         A ConditionalTransform callable class for the passed dataset to use.
     """
-    if not isinstance(dataset, HARBaseDataset):
-        if not isinstance(dataset, ConcatDataset):
-            raise TypeError(f"The passed dataset of type {type(dataset)} is not a HARBaseDataset nor ConcatDataset.")
-        else:
-            for d in dataset.datasets:
-                if not isinstance(d, HARBaseDataset):
-                    raise TypeError(f"The passed ConcatDataset contains type {type(d)} that's not HARBaseDataset.")
 
     stft_transform = STFTTransform(n_fft=n_fft, hop_length=hop_length, win_length=win_length)
     stat_features_transform = StatFeaturesTransform()
