@@ -697,6 +697,32 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
         return sessions
 
 
+def get_full_dataset(train_split_ratio, validation_split_ratio, window_size, stride, seed, n_fft, hop_length, win_length, train_mode = True, validation_mode = False, test_mode = False, ):
+    dataset1 = HARTHDataset(train_mode=train_mode, train_split_ratio=train_split_ratio,
+                            validation_split_ratio=validation_split_ratio,
+                            validation_mode=validation_mode, test_mode=test_mode, window_size=window_size, stride=stride, seed=seed)
+    dataset2 = MHEALTHDataset(train_mode=train_mode, train_split_ratio=train_split_ratio,
+                              validation_split_ratio=validation_split_ratio,
+                              validation_mode=validation_mode, test_mode=test_mode, window_size=window_size, stride=stride, seed=seed)
+    dataset3 = InducedStressStructuredExerciseWearableDeviceDataset(train_mode=train_mode,
+                                                                    train_split_ratio=train_split_ratio,
+                                                                    validation_split_ratio=validation_split_ratio,
+                                                                    validation_mode=validation_mode, test_mode=test_mode,
+                                                                    window_size=window_size, stride=stride, seed=seed)
+    dataset4 = HAR70Dataset(train_mode=train_mode, train_split_ratio=train_split_ratio,
+                            validation_split_ratio=validation_split_ratio,
+                            validation_mode=validation_mode, test_mode=test_mode, window_size=window_size, stride=stride, seed=seed)
+
+    all_datasets = [dataset1, dataset2, dataset3, dataset4]
+    concat_dataset_for_transforms = ConcatDataset(all_datasets)
+
+    # obtain the transform function for each dataset
+    transform = create_conditional_transform(concat_dataset_for_transforms, n_fft, hop_length, win_length)
+
+    for d in all_datasets:
+        d.transform = transform
+
+    return ConcatDataset(all_datasets)
 
 if __name__ == "__main__":
     window_size = 250
@@ -708,17 +734,15 @@ if __name__ == "__main__":
     hop_length = 25
     win_length = 50
 
-
-
-    dataset1 = HARTHDataset(train_mode=True, train_split_ratio=train_split_ratio, validation_split_ratio=validation_split_ratio,
-                           validation_mode=False, test_mode=False, window_size=window_size, stride=stride, seed=seed)
-    dataset2 = MHEALTHDataset(train_mode=True, train_split_ratio=train_split_ratio, validation_split_ratio=validation_split_ratio,
-                           validation_mode=False, test_mode=False, window_size=window_size, stride=stride, seed=seed)
-    dataset3 = InducedStressStructuredExerciseWearableDeviceDataset(train_mode=True, train_split_ratio=train_split_ratio, validation_split_ratio=validation_split_ratio,
-                           validation_mode=False, test_mode=False, window_size=window_size, stride=stride, seed=seed)
-    dataset4 = HAR70Dataset(train_mode=True, train_split_ratio=train_split_ratio, validation_split_ratio=validation_split_ratio,
-                           validation_mode=False, test_mode=False, window_size=window_size, stride=stride, seed=seed)
-
-    full_data = ConcatDataset([dataset1, dataset2, dataset3, dataset4])
-    transform = create_conditional_transform(full_data, n_fft, hop_length, win_length)
-    full_data.transform = transform
+    dataset = get_full_dataset(train_split_ratio, validation_split_ratio, window_size, stride, seed, n_fft, hop_length, win_length)
+    import time
+    start = time.perf_counter()
+    a = dataset[2000]
+    end = time.perf_counter()
+    print(end - start)
+    print((end - start) * len(dataset))
+    start = time.perf_counter()
+    b = dataset[2000]
+    end = time.perf_counter()
+    print(end - start)
+    print((end - start) * len(dataset))
