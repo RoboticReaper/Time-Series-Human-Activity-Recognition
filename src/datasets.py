@@ -82,13 +82,13 @@ class NumpyDataPoint:
 @dataclass
 class TorchDataPoint(NumpyDataPoint):
     """
-    A dataclass to hold sensor data as PyTorch Tensors instead of NumPy array like DataPoint. Everything else is the same
+    A dataclass to hold sensor data as PyTorch Tensors instead of NumPy arrays.
     """
     sensors: Dict[Sensor, torch.Tensor]
     already_transformed: Dict[Sensor, bool] # to keep track of caching to avoid re-transforming
 
     def __post_init__(self):
-        # Although logic is the same as DataPoint, it's best practice to make the behavior explicit and self-contained
+        # Although logic is the same, it's best practice to make the behavior explicit and self-contained
         for sensor_type, data in self.sensors.items():
             if sensor_type not in SENSOR_AXES_MAP:
                 raise ValueError(f"Sensor type {sensor_type} is not supported.")
@@ -697,7 +697,7 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
         return sessions
 
 
-def get_full_dataset(train_split_ratio, validation_split_ratio, window_size, stride, seed, n_fft, hop_length, win_length, train_mode = True, validation_mode = False, test_mode = False, ):
+def get_full_transformed_dataset(train_split_ratio, validation_split_ratio, window_size, stride, seed, n_fft, hop_length, win_length, train_mode = True, validation_mode = False, test_mode = False, ):
     dataset1 = HARTHDataset(train_mode=train_mode, train_split_ratio=train_split_ratio,
                             validation_split_ratio=validation_split_ratio,
                             validation_mode=validation_mode, test_mode=test_mode, window_size=window_size, stride=stride, seed=seed)
@@ -734,7 +734,7 @@ if __name__ == "__main__":
     hop_length = 25
     win_length = 50
 
-    dataset = get_full_dataset(train_split_ratio, validation_split_ratio, window_size, stride, seed, n_fft, hop_length, win_length)
+    dataset = get_full_transformed_dataset(train_split_ratio, validation_split_ratio, window_size, stride, seed, n_fft, hop_length, win_length)
     import time
     start = time.perf_counter()
     a = dataset[2000]
