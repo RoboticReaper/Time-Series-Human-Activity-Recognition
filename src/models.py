@@ -28,6 +28,13 @@ class TransformerEncoderNetwork(pl.LightningModule):
             encoder_layer=encoder_layer,
             num_layers=kwargs["n_encoder_layers"],
         )
+        self.prediction_head = nn.Linear(kwargs["d_model"], kwargs["output_dim"])
+
+    def forward(self, x):
+        x = self.emb(x)
+        x = self.transformer_encoder(x)
+        output = self.prediction_head(x)
+        return output
 
 
 class InputEmbeddingPosEncoding(nn.Module):
@@ -41,8 +48,8 @@ class InputEmbeddingPosEncoding(nn.Module):
         self.pos_encoder = AbsolutePositionalEncoding(d_model=d_model, dropout=0.0)
 
     def forward(self, x):
-        pe_x = self.pos_encoder(x)
         x = self.lin_proj_layer(x)
+        pe_x = self.pos_encoder(x)
 
         return x + pe_x
 
