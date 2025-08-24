@@ -2,7 +2,7 @@ from collections import defaultdict
 
 import torch
 from tqdm import tqdm
-from sensors import SensorFrequency, Sensor
+from sensors import SensorFrequency, Sensor, SENSOR_FREQUENCY_MAP
 from typing import Dict, Type
 
 
@@ -33,7 +33,9 @@ class STFTTransform:
 
         magnitude_spectrogram = torch.abs(stft_complex)
 
-        return magnitude_spectrogram
+        log_spectrogram = torch.log1p(magnitude_spectrogram)
+
+        return log_spectrogram
 
 
 class StatFeaturesTransform:
@@ -94,7 +96,7 @@ class BaseZScoreNormalizer:
         # Mean and std are stored here; subclasses will reshape them.
         self.epsilon = 1e-8
         self.mean = mean
-        self.std = std + self.epsilon
+        self.std = torch.clamp(std, min=self.epsilon)
 
     def __call__(self, data: torch.Tensor) -> torch.Tensor:
         """
@@ -194,10 +196,6 @@ class ConditionalTransform:
 
     High frequency sensors use STFT. Low frequency sensors are converted to statistical features.
     Then they are all normalized.
-
-    Transformation is applied in-place and cached in TorchDataPoint to avoid re-computation.
-    This means if for some reason this transform is removed from a dataset,
-    the data returned will still be the transformed result.
     """
     def __init__(self, stft_transform: STFTTransform,
                  stat_features_transform: StatFeaturesTransform,
@@ -215,17 +213,16 @@ class ConditionalTransform:
     def __call__(self, datapoint):
         """datapoint is a TorchDataPoint."""
         for sensor, data in list(datapoint.sensors.items()):
-            if datapoint.already_transformed.get(sensor, False):
-                continue
-
-            if sensor.frequency == SensorFrequency.HIGH:
+            if SENSOR_FREQUENCY_MAP[sensor] == SensorFrequency.HIGH:
                 transformed_data = self.stft_transform(data)
                 # Look up the correct normalizer for this sensor
                 if sensor in self.spectrogram_normalizers:
                     normalizer = self.spectrogram_normalizers[sensor]
                     transformed_data = normalizer(transformed_data)
+                    if torch.max(transformed_data) > 10.0:
+                        print(f"{sensor} in {datapoint.data_source}: has max of {torch.max(transformed_data)} after normalization")
 
-            elif sensor.frequency == SensorFrequency.LOW:
+            elif SENSOR_FREQUENCY_MAP[sensor] == SensorFrequency.LOW:
                 transformed_data = self.stat_features_transform(data)
                 # Look up the correct normalizer for this sensor
                 if sensor in self.stat_features_normalizers:
@@ -235,7 +232,6 @@ class ConditionalTransform:
                 raise TypeError(f'Unknown sensor frequency category for sensor: {sensor.name}')
 
             datapoint.sensors[sensor] = transformed_data
-            datapoint.already_transformed[sensor] = True
 
         return datapoint
 
@@ -250,7 +246,7 @@ def _fit_spectrogram_z_normalizer(dataset, transform: STFTTransform):
     for i in tqdm(range(len(dataset))):
         data_point = dataset[i]
         for sensor, sensor_data in data_point.sensors.items():
-            if sensor.frequency == SensorFrequency.HIGH:
+            if SENSOR_FREQUENCY_MAP[sensor] == SensorFrequency.HIGH:
                 spectrogram = transform(sensor_data)
                 all_spectrograms_by_sensor[sensor].append(spectrogram)
 
@@ -261,7 +257,7 @@ def _fit_spectrogram_z_normalizer(dataset, transform: STFTTransform):
         mean = torch.mean(full_tensor, dim=(0, 1, 3))
         std = torch.std(full_tensor, dim=(0, 1, 3))
         stats_dict[sensor] = {'mean': mean, 'std': std}
-        print(f"  - {sensor.name}: stats calculated.")
+        print(f"  - {sensor.name}: stats calculated. Mean {mean.mean()}, Std {std.mean()}, Min {torch.min(full_tensor)}, Max {torch.max(full_tensor)}")
 
     return stats_dict
 
@@ -275,7 +271,7 @@ def _fit_stat_features_z_normalizer(dataset, transform: StatFeaturesTransform):
     for i in tqdm(range(len(dataset))):
         data_point = dataset[i]
         for sensor, sensor_data in data_point.sensors.items():
-            if sensor.frequency == SensorFrequency.LOW:
+            if SENSOR_FREQUENCY_MAP[sensor] == SensorFrequency.LOW:
                 features = transform(sensor_data)
                 all_features_by_sensor[sensor].append(features)
 

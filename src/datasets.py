@@ -1,14 +1,15 @@
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Union
+from typing import List, Dict, Tuple, Union, Optional
 from scipy import signal
 from datetime import datetime
 
 from torch.utils.data import ConcatDataset
 
-from sensors import SensorFrequency, Sensor, SENSOR_AXES_MAP
+from sensors import SensorFrequency, Sensor, SENSOR_AXES_MAP, SENSOR_FREQUENCY_MAP
 from enum import Enum, auto
+
 from utils import create_conditional_transform
 
 import numpy as np
@@ -17,6 +18,7 @@ import wget
 import tempfile
 import zipfile
 import pandas as pd
+import pickle
 
 
 class ActivityLabel(Enum):
@@ -60,6 +62,7 @@ class NumpyDataPoint:
     sensors: Dict[Sensor, np.ndarray]
     sampling_rate: Dict[Sensor, int]
     label: ActivityLabel
+    data_source: str
 
     def __post_init__(self):
         """
@@ -85,7 +88,6 @@ class TorchDataPoint(NumpyDataPoint):
     A dataclass to hold sensor data as PyTorch Tensors instead of NumPy arrays.
     """
     sensors: Dict[Sensor, torch.Tensor]
-    already_transformed: Dict[Sensor, bool] # to keep track of caching to avoid re-transforming
 
     def __post_init__(self):
         # Although logic is the same, it's best practice to make the behavior explicit and self-contained
@@ -193,10 +195,8 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
                 for sensor, data in datapoint.sensors.items()
             }
 
-            already_transformed = {sensor: False for sensor in sensors.keys()}
 
-            torch_datapoints.append(TorchDataPoint(sensors=sensors, sampling_rate=datapoint.sampling_rate, label=datapoint.label,
-                                                   already_transformed=already_transformed))
+            torch_datapoints.append(TorchDataPoint(sensors=sensors, sampling_rate=datapoint.sampling_rate, label=datapoint.label, data_source=datapoint.data_source))
 
         return torch_datapoints
 
@@ -262,7 +262,8 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
                 windowed_data.append(NumpyDataPoint(
                     sensors=windowed_sensors,
                     sampling_rate=session.sampling_rate,
-                    label=session.label
+                    label=session.label,
+                    data_source=session.data_source
                 ))
         print(f"Created {len(windowed_data)} windowed sessions from {len(long_data_sessions)} sessions.")
         return windowed_data
@@ -298,6 +299,106 @@ class HARBaseDataset(torch.utils.data.Dataset, ABC):
     def __len__(self):
         return self.size
 
+
+class PreprocessedDataset(torch.utils.data.Dataset):
+    """
+    A simple class that contains already preprocessed data. Optimal for saving and loading and multiprocessing.
+    """
+    def __init__(self):
+        self.sample = []
+        self.size = 0
+
+    def add_data(self, data):
+        self.sample.append(data)
+        self.size += 1
+
+    def __getitem__(self, idx):
+        return self.sample[idx]
+
+    def __len__(self):
+        return self.size
+
+
+
+class MaskingCollateFn:
+    """
+    A collate_fn for DataLoader on high frequency sensors during masked autoencoder training.
+
+    Takes a list of TorchDataPoint samples already STFT transformed, batches them, applies time and frequency masking,
+    and padding zero tensor for unavailable sensors.
+
+    Should skip current batch if returned None.
+    """
+    def __init__(self, time_mask_prob = 0.15, freq_mask_prob = 0.20):
+        self.time_mask_prob = time_mask_prob
+        self.freq_mask_prob = freq_mask_prob
+
+    def __call__(self, batch):
+        # Find values for freq_bins and time_frames for zero-padding unavailable high-frequency sensors
+        ref_freq_bins, ref_time_frames = None, None
+
+        for datapoint in batch:
+            # Find the first high-frequency sensor in this datapoint
+            first_hf_sensor_value = next(
+                (value for sensor, value in datapoint.sensors.items() if SENSOR_FREQUENCY_MAP[sensor] == SensorFrequency.HIGH),
+                None
+            )
+            if first_hf_sensor_value is not None:
+                # Found a shape, store it and break the loop
+                _, ref_freq_bins, ref_time_frames = first_hf_sensor_value.shape
+                break
+
+            # If no high-frequency sensors were found in the entire batch, we can't proceed.
+        if ref_freq_bins is None:
+            # Returning None can be handled in training loop to skip the batch.
+            return None
+
+        processed_samples = []
+        for datapoint in batch:
+            # Create a dictionary of all known sensors
+            # Because using for-loop on Enum classes returns items in the same order as defined,
+            # the input tensors will have fixed shapes and sensor axes order.
+            padded_sensors: dict[Sensor, Optional[torch.Tensor]] = {k:None for k in Sensor if SENSOR_FREQUENCY_MAP[k] == SensorFrequency.HIGH}
+
+            # Fill in existing data for sensors in datapoint
+            for key, value in datapoint.sensors.items():
+                if SENSOR_FREQUENCY_MAP[key] == SensorFrequency.HIGH:
+                    padded_sensors[key] = value
+
+            # Zero pad sensors not in datapoint
+            for key in padded_sensors.keys():
+                if padded_sensors[key] is None:
+                    padded_sensors[key] = torch.zeros(SENSOR_AXES_MAP[key], ref_freq_bins, ref_time_frames)
+
+            new_tensor = torch.cat(list(padded_sensors.values()), dim=0)
+            processed_samples.append(new_tensor)
+        processed_samples = torch.stack(processed_samples)
+
+        batch_size, axes, freq_bins, time_frames = processed_samples.shape
+
+        # Time Masking
+        num_time_to_mask = int(self.time_mask_prob * time_frames)
+        time_indices = torch.randperm(time_frames)[:num_time_to_mask]
+        mask_time = torch.ones(time_frames)
+        mask_time[time_indices] = 0
+
+        # Frequency Masking
+        num_freq_to_mask = int(self.freq_mask_prob * freq_bins)
+        freq_indices = torch.randperm(freq_bins)[:num_freq_to_mask]
+        mask_freq = torch.ones(freq_bins)
+        mask_freq[freq_indices] = 0
+
+        # Combine and apply mask
+        combined_mask = mask_time.view(1, 1, 1, -1) * mask_freq.view(1, 1, -1, 1)
+        binary_mask_for_loss = 1 - combined_mask
+        masked_input = processed_samples * combined_mask
+
+        # Return a dictionary with everything needed for the training step
+        return {
+            'masked_input': masked_input,
+            'original_spectrograms': processed_samples,
+            'binary_mask': binary_mask_for_loss
+        }
 
 
 class HARTHDataset(HARBaseDataset):
@@ -347,7 +448,7 @@ class HARTHDataset(HARBaseDataset):
                         Sensor.ACC_THIGH_RIGHT: session_df[['thigh_x', 'thigh_y', 'thigh_z']].to_numpy().T
                     }
 
-                    sessions.append(NumpyDataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
+                    sessions.append(NumpyDataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES, data_source="HARTH"))
 
         return sessions
 
@@ -393,7 +494,7 @@ class HAR70Dataset(HARBaseDataset):
                         Sensor.ACC_THIGH_RIGHT: session_df[['thigh_x', 'thigh_y', 'thigh_z']].to_numpy().T
                     }
 
-                    sessions.append(NumpyDataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
+                    sessions.append(NumpyDataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES, data_source="HAR70"))
 
         return sessions
 
@@ -465,7 +566,7 @@ class MHEALTHDataset(HARBaseDataset):
                         Sensor.MAGNETOMETER_ARM_LOWER_RIGHT: session_df[['mag_right_lower_arm_x', 'mag_right_lower_arm_y', 'mag_right_lower_arm_z']].to_numpy().T
                     }
 
-                    sessions.append(NumpyDataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES))
+                    sessions.append(NumpyDataPoint(sensors=sensors, label=label, sampling_rate=self.SAMPLING_RATES, data_source="MHEALTH"))
 
         return sessions
 
@@ -568,7 +669,8 @@ class InducedStressStructuredExerciseWearableDeviceDataset(HARBaseDataset):
         return NumpyDataPoint(
             sensors=segmented_sensors,
             sampling_rate=self.SAMPLING_RATES.copy(),
-            label=label
+            label=label,
+            data_source="InducedStress"
         )
 
     def _process_stress(self, data_frames, start_time, tags, subject_dir_name):
@@ -724,25 +826,23 @@ def get_full_transformed_dataset(train_split_ratio, validation_split_ratio, wind
 
     return ConcatDataset(all_datasets)
 
-if __name__ == "__main__":
-    window_size = 250
-    stride = 100
-    seed = 42
-    train_split_ratio = 0.8
-    validation_split_ratio = 0.1
-    n_fft = 50
-    hop_length = 25
-    win_length = 50
+def save_dataset_to_disk(dataset, save_name="dataset.pickle"):
+    print("Putting data into PreprocessedDataset")
+    dataset_to_save = PreprocessedDataset()
+    for i in range(len(dataset)):
+        data = dataset[i]
+        dataset_to_save.add_data(data)
 
-    dataset = get_full_transformed_dataset(train_split_ratio, validation_split_ratio, window_size, stride, seed, n_fft, hop_length, win_length)
-    import time
-    start = time.perf_counter()
-    a = dataset[2000]
-    end = time.perf_counter()
-    print(end - start)
-    print((end - start) * len(dataset))
-    start = time.perf_counter()
-    b = dataset[2000]
-    end = time.perf_counter()
-    print(end - start)
-    print((end - start) * len(dataset))
+    print("Saving dataset")
+    with open(save_name, "wb") as f:
+        pickle.dump(dataset_to_save, f)
+
+    print(f"Saved dataset to disk: {save_name}")
+
+def load_dataset_from_disk(save_name="dataset.pickle"):
+    with open(save_name, "rb") as f:
+        dataset_to_load = pickle.load(f)
+
+    print(f"Loaded dataset from disk: {save_name}")
+    return dataset_to_load
+

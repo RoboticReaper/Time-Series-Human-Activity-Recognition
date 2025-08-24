@@ -4,3 +4,5 @@ load_chronos/data.csv
 modified_chronos_experiments/data
 src/data
 src/__pycache__
+src/lightning_logs
+src/dataset.pickle
